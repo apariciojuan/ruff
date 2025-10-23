@@ -335,6 +335,12 @@ impl<'db> ConstrainedTypeVar<'db> {
     ) -> Node<'db> {
         debug_assert_eq!(lower, lower.bottom_materialization(db));
         debug_assert_eq!(upper, upper.top_materialization(db));
+        eprintln!(
+            "==> new constraint {} ≤ {} ≤ {}",
+            lower.display(db),
+            typevar.identity(db).display(db),
+            upper.display(db),
+        );
 
         // If `lower ≰ upper`, then the constraint cannot be satisfied, since there is no type that
         // is both greater than `lower`, and less than `upper`.
@@ -350,6 +356,12 @@ impl<'db> ConstrainedTypeVar<'db> {
 
         let lower = lower.normalized(db);
         let upper = upper.normalized(db);
+        eprintln!(
+            " -> normalized {} ≤ {} ≤ {}",
+            lower.display(db),
+            typevar.identity(db).display(db),
+            upper.display(db),
+        );
 
         // We have an (arbitrary) ordering for typevars. If the upper and/or lower bounds are
         // typevars, we have to ensure that the bounds are "later" according to that order than the
@@ -360,6 +372,13 @@ impl<'db> ConstrainedTypeVar<'db> {
         match (lower, upper) {
             // L ≤ T ≤ L == (T ≤ [L] ≤ T)
             (Type::TypeVar(lower), Type::TypeVar(upper)) if lower == upper => {
+                eprintln!(
+                    " -> new constraint {} {} {:?} NOT {:?}",
+                    lower.identity(db).display(db),
+                    typevar.identity(db).display(db),
+                    lower.identity(db).cmp(&typevar.identity(db)),
+                    lower.cmp(&typevar),
+                );
                 let (bound, typevar) = if lower.can_be_bound_for(db, typevar) {
                     (lower, typevar)
                 } else {
@@ -771,11 +790,30 @@ impl<'db> Node<'db> {
                     Type::TypeVar(rhs) if bound_typevar.can_be_bound_for(db, rhs) => rhs,
                     _ => bound_typevar,
                 };
+                eprintln!(
+                    "==> wstog {} {} {}",
+                    self.display(db),
+                    lhs.display(db),
+                    rhs.display(db)
+                );
+                eprintln!(
+                    " -> constrained {}",
+                    constrained_typevar.identity(db).display(db)
+                );
                 let projected = self
                     .project_typevar(db, constrained_typevar.identity(db))
                     .simplify(db, self);
                 let constraint = ConstrainedTypeVar::new_node(db, bound_typevar, Type::Never, rhs);
-                projected.and(db, constraint).iff(db, projected)
+                let combined = projected.and(db, constraint);
+                eprintln!(" -> self {}", self.display(db));
+                eprintln!("    {}", self.display_graph(db, &"    "));
+                eprintln!(" -> projected {}", projected.display(db));
+                eprintln!("    {}", projected.display_graph(db, &"    "));
+                eprintln!(" -> constraint {}", constraint.display(db));
+                eprintln!("    {}", constraint.display_graph(db, &"    "));
+                eprintln!(" -> combined {}", combined.display(db));
+                eprintln!("    {}", combined.display_graph(db, &"    "));
+                combined.iff(db, projected)
             }
 
             (_, Type::TypeVar(bound_typevar)) => {
@@ -1222,11 +1260,23 @@ impl<'db> InteriorNode<'db> {
         let self_constraint = self.constraint(db);
         let if_true = self.if_true(db).project_typevar(db, typevar);
         let if_false = self.if_false(db).project_typevar(db, typevar);
-        if self_constraint.typevar(db).identity(db) > typevar {
+        eprintln!(
+            "==> project {} {} {}",
+            Node::Interior(self).display(db),
+            self_constraint.typevar(db).identity(db).display(db),
+            typevar.display(db)
+        );
+        eprintln!(" -> true  {}", if_true.display(db));
+        eprintln!(" -> false {}", if_false.display(db));
+        let result = if self_constraint.typevar(db).identity(db) > typevar {
+            eprintln!(" -> done");
             if_true.or(db, if_false)
         } else {
+            eprintln!(" -> replace");
             Node::new(db, self_constraint, if_true, if_false)
-        }
+        };
+        eprintln!(" -> result {}", result.display(db));
+        result
     }
 
     #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
