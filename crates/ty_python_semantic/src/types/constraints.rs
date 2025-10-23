@@ -453,7 +453,11 @@ impl<'db> ConstrainedTypeVar<'db> {
     }
 
     /// Returns the intersection of two range constraints, or `None` if the intersection is empty.
-    fn intersect(self, db: &'db dyn Db, other: Self) -> Option<Self> {
+    fn intersect(self, db: &'db dyn Db, other: Self) -> IntersectionResult<'db> {
+        if self.typevar(db).identity(db) != other.typevar(db).identity(db) {
+            return IntersectionResult::DifferentTypeVars;
+        }
+
         // (s₁ ≤ α ≤ t₁) ∧ (s₂ ≤ α ≤ t₂) = (s₁ ∪ s₂) ≤ α ≤ (t₁ ∩ t₂))
         let lower = UnionType::from_elements(db, [self.lower(db), other.lower(db)]).normalized(db);
         let upper =
@@ -462,10 +466,10 @@ impl<'db> ConstrainedTypeVar<'db> {
         // If `lower ≰ upper`, then the intersection is empty, since there is no type that is both
         // greater than `lower`, and less than `upper`.
         if !lower.is_subtype_of(db, upper) {
-            return None;
+            return IntersectionResult::Empty;
         }
 
-        Some(Self::new(db, self.typevar(db), lower, upper))
+        IntersectionResult::Intersection(Self::new(db, self.typevar(db), lower, upper))
     }
 
     fn display(self, db: &'db dyn Db) -> impl Display {
@@ -539,6 +543,12 @@ impl<'db> ConstrainedTypeVar<'db> {
             db,
         }
     }
+}
+
+enum IntersectionResult<'db> {
+    Intersection(ConstrainedTypeVar<'db>),
+    Empty,
+    DifferentTypeVars,
 }
 
 /// A BDD node.
@@ -1329,7 +1339,7 @@ impl<'db> InteriorNode<'db> {
             // constraints is empty, and others that we can make when the intersection is
             // non-empty.
             match left_constraint.intersect(db, right_constraint) {
-                Some(intersection_constraint) => {
+                IntersectionResult::Intersection(intersection_constraint) => {
                     // If the intersection is non-empty, we need to create a new constraint to
                     // represent that intersection. We also need to add the new constraint to our
                     // seen set and (if we haven't already seen it) to the to-visit queue.
@@ -1415,7 +1425,7 @@ impl<'db> InteriorNode<'db> {
                     );
                 }
 
-                None => {
+                IntersectionResult::Empty => {
                     // All of the below hold because we just proved that the intersection of left
                     // and right is empty.
 
@@ -1463,6 +1473,8 @@ impl<'db> InteriorNode<'db> {
                         positive_right_node,
                     );
                 }
+
+                IntersectionResult::DifferentTypeVars => {}
             }
         }
 
@@ -1537,7 +1549,10 @@ impl<'db> ConstraintAssignment<'db> {
             (
                 ConstraintAssignment::Positive(self_constraint),
                 ConstraintAssignment::Negative(other_constraint),
-            ) => self_constraint.intersect(db, other_constraint).is_none(),
+            ) => matches!(
+                self_constraint.intersect(db, other_constraint),
+                IntersectionResult::Empty
+            ),
 
             // It's theoretically possible for a negative constraint to imply a positive constraint
             // if the positive constraint is always satisfied (`Never ≤ T ≤ object`). But we never
