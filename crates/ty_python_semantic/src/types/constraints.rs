@@ -285,7 +285,7 @@ impl<'db> ConstraintSet<'db> {
     }
 
     pub(crate) fn display(self, db: &'db dyn Db) -> impl Display {
-        self.node.simplify(db).display(db)
+        self.node.simplify(db, self.node).display(db)
     }
 }
 
@@ -450,6 +450,27 @@ impl<'db> ConstrainedTypeVar<'db> {
         }
         other.lower(db).is_subtype_of(db, self.lower(db))
             && self.upper(db).is_subtype_of(db, other.upper(db))
+    }
+
+    /// Returns whether this constraint implies another — i.e., whether every type that
+    /// satisfies this constraint also satisfies `other` — assuming that a particular set of
+    /// constraints hold.
+    fn implies_given(self, db: &'db dyn Db, other: Self, given: Node<'db>) -> bool {
+        let lower_bound_tighter = given.when_subtype_of_given(
+            db,
+            other.lower(db),
+            self.lower(db),
+            InferableTypeVars::None,
+        );
+        let upper_bound_tighter = given.when_subtype_of_given(
+            db,
+            self.upper(db),
+            other.upper(db),
+            InferableTypeVars::None,
+        );
+        lower_bound_tighter
+            .and(db, upper_bound_tighter)
+            .is_always_satisfied(db)
     }
 
     /// Returns the intersection of two range constraints, or `None` if the intersection is empty.
@@ -641,7 +662,7 @@ impl<'db> Node<'db> {
             Node::AlwaysTrue => true,
             Node::AlwaysFalse => false,
             Node::Interior(_) => {
-                let domain = self.domain(db);
+                let domain = self.domain(db, self);
                 let restricted = self.and(db, domain);
                 restricted == domain
             }
@@ -750,13 +771,17 @@ impl<'db> Node<'db> {
                     Type::TypeVar(rhs) if bound_typevar.can_be_bound_for(db, rhs) => rhs,
                     _ => bound_typevar,
                 };
-                let projected = self.project_typevar(db, constrained_typevar.identity(db));
+                let projected = self
+                    .project_typevar(db, constrained_typevar.identity(db))
+                    .simplify(db, self);
                 let constraint = ConstrainedTypeVar::new_node(db, bound_typevar, Type::Never, rhs);
                 projected.and(db, constraint).iff(db, projected)
             }
 
             (_, Type::TypeVar(bound_typevar)) => {
-                let projected = self.project_typevar(db, bound_typevar.identity(db));
+                let projected = self
+                    .project_typevar(db, bound_typevar.identity(db))
+                    .simplify(db, self);
                 let constraint =
                     ConstrainedTypeVar::new_node(db, bound_typevar, lhs, Type::object());
                 projected.and(db, constraint).iff(db, projected)
@@ -937,22 +962,22 @@ impl<'db> Node<'db> {
     }
 
     /// Simplifies a BDD, replacing constraints with simpler or smaller constraints where possible.
-    fn simplify(self, db: &'db dyn Db) -> Self {
+    fn simplify(self, db: &'db dyn Db, given: Node<'db>) -> Self {
         match self {
             Node::AlwaysTrue | Node::AlwaysFalse => self,
             Node::Interior(interior) => {
-                let (simplified, _) = interior.simplify(db);
+                let (simplified, _) = interior.simplify(db, given);
                 simplified
             }
         }
     }
 
     /// Returns the domain (the set of allowed inputs) for a BDD.
-    fn domain(self, db: &'db dyn Db) -> Self {
+    fn domain(self, db: &'db dyn Db, given: Node<'db>) -> Self {
         match self {
             Node::AlwaysTrue | Node::AlwaysFalse => Node::AlwaysTrue,
             Node::Interior(interior) => {
-                let (_, domain) = interior.simplify(db);
+                let (_, domain) = interior.simplify(db, given);
                 domain
             }
         }
@@ -1241,7 +1266,7 @@ impl<'db> InteriorNode<'db> {
     /// `x ∧ ¬y` is not a valid input, and is excluded from the BDD's domain. At the same time, we
     /// can rewrite any occurrences of `x ∨ y` into `y`.
     #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
-    fn simplify(self, db: &'db dyn Db) -> (Node<'db>, Node<'db>) {
+    fn simplify(self, db: &'db dyn Db, given: Node<'db>) -> (Node<'db>, Node<'db>) {
         // To simplify a non-terminal BDD, we find all pairs of constraints that are mentioned in
         // the BDD. If any of those pairs can be simplified to some other BDD, we perform a
         // substitution to replace the pair with the simplification.
@@ -1270,19 +1295,11 @@ impl<'db> InteriorNode<'db> {
         let mut simplified = Node::Interior(self);
         let mut domain = Node::AlwaysTrue;
         while let Some((left_constraint, right_constraint)) = to_visit.pop() {
-            // If the constraints refer to different typevars, they trivially cannot be compared.
-            // TODO: We might need to consider when one constraint's upper or lower bound refers to
-            // the other constraint's typevar.
-            let typevar = left_constraint.typevar(db);
-            if typevar != right_constraint.typevar(db) {
-                continue;
-            }
-
             // Containment: The range of one constraint might completely contain the range of the
             // other. If so, there are several potential simplifications.
-            let larger_smaller = if left_constraint.implies(db, right_constraint) {
+            let larger_smaller = if left_constraint.implies_given(db, right_constraint, given) {
                 Some((right_constraint, left_constraint))
-            } else if right_constraint.implies(db, left_constraint) {
+            } else if right_constraint.implies_given(db, left_constraint, given) {
                 Some((left_constraint, right_constraint))
             } else {
                 None
